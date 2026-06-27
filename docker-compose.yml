@@ -1,0 +1,23 @@
+services:
+  filament-sync:
+    container_name: filament-sync
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: filament-sync:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.docker
+    environment:
+      NODE_ENV: production
+    # Keep SQLite session data persistent across restarts.
+    volumes:
+      - ./data/dev.sqlite:/app/prisma/dev.sqlite
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

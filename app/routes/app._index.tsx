@@ -339,7 +339,6 @@ const PRODUCT_VARIANT_INVENTORY_QUERY = `#graphql
     locations(first: 1) {
       nodes {
         id
-        name
       }
     }
   }
@@ -1118,7 +1117,7 @@ async function restockProductVariants(
   admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
   productId: string,
   quantity: number,
-): Promise<{ count: number; locationName: string }> {
+): Promise<{ count: number }> {
   const inventoryResponse = await admin.graphql(PRODUCT_VARIANT_INVENTORY_QUERY, {
     variables: {
       productId,
@@ -1138,7 +1137,6 @@ async function restockProductVariants(
       locations?: {
         nodes?: Array<{
           id: string;
-          name: string;
         }>;
       };
     };
@@ -1159,7 +1157,7 @@ async function restockProductVariants(
     .filter((id): id is string => Boolean(id));
 
   if (inventoryItemIds.length === 0) {
-    return { count: 0, locationName: location.name };
+    return { count: 0 };
   }
 
   const setResponse = await admin.graphql(INVENTORY_SET_QUANTITIES_MUTATION, {
@@ -1198,7 +1196,7 @@ async function restockProductVariants(
     throw new Error(userErrors.map((error) => error.message).join(" | "));
   }
 
-  return { count: inventoryItemIds.length, locationName: location.name };
+  return { count: inventoryItemIds.length };
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs): Promise<LoaderData> => {
@@ -1453,7 +1451,7 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
         TARGET_VARIANT_STOCK,
       );
       notices.push(
-        `${restocked.count} Variante(n) wurden am Standort ${restocked.locationName} auf ${TARGET_VARIANT_STOCK} Stueck gesetzt.`,
+        `${restocked.count} Variante(n) wurden auf ${TARGET_VARIANT_STOCK} Stueck gesetzt.`,
       );
 
       previews = materialProfiles.map((materialProfile) =>

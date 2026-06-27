@@ -345,11 +345,8 @@ const PRODUCT_VARIANT_INVENTORY_QUERY = `#graphql
 `;
 
 const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
-  mutation InventorySetQuantities(
-    $input: InventorySetQuantitiesInput!
-    $idempotencyKey: String!
-  ) {
-    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
       userErrors {
         field
         message
@@ -1174,7 +1171,6 @@ async function restockProductVariants(
           compareQuantity: null,
         })),
       },
-      idempotencyKey: `${productId}-${quantity}-${Date.now()}`,
     },
   });
 

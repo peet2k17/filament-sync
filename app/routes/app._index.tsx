@@ -13,6 +13,7 @@ const MATERIAL_PROFILE_KEY = "materialprofil";
 const DEFAULT_COLOR_OPTION_NAME = "Farbe";
 const ENABLE_LINKED_SWATCH_OPTIONS = false;
 const INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES = false;
+const TARGET_VARIANT_STOCK = 10;
 const SHOPIFY_COLOR_PATTERN_NAMESPACE = "shopify";
 const SHOPIFY_COLOR_PATTERN_KEY = "color-pattern";
 const SHOPIFY_COLOR_PATTERN_TYPE = "shopify--color-pattern";
@@ -314,6 +315,42 @@ const PRODUCT_VARIANTS_BULK_CREATE_MUTATION = `#graphql
         id
         title
       }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const PRODUCT_VARIANT_INVENTORY_QUERY = `#graphql
+  query ProductVariantInventory($productId: ID!) {
+    product(id: $productId) {
+      id
+      variants(first: 250) {
+        nodes {
+          id
+          inventoryItem {
+            id
+          }
+        }
+      }
+    }
+    locations(first: 1) {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+`;
+
+const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
+  mutation InventorySetQuantities(
+    $input: InventorySetQuantitiesInput!
+    $idempotencyKey: String!
+  ) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
       userErrors {
         field
         message
@@ -1077,6 +1114,93 @@ async function createMissingVariants(
   return responseJson.data?.productVariantsBulkCreate?.productVariants?.length ?? 0;
 }
 
+async function restockProductVariants(
+  admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
+  productId: string,
+  quantity: number,
+): Promise<{ count: number; locationName: string }> {
+  const inventoryResponse = await admin.graphql(PRODUCT_VARIANT_INVENTORY_QUERY, {
+    variables: {
+      productId,
+    },
+  });
+
+  const inventoryJson = (await inventoryResponse.json()) as {
+    data?: {
+      product?: {
+        variants?: {
+          nodes?: Array<{
+            id: string;
+            inventoryItem?: { id: string } | null;
+          }>;
+        };
+      } | null;
+      locations?: {
+        nodes?: Array<{
+          id: string;
+          name: string;
+        }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (inventoryJson.errors?.length) {
+    throw new Error(inventoryJson.errors.map((error) => error.message).join(" | "));
+  }
+
+  const location = inventoryJson.data?.locations?.nodes?.[0];
+  if (!location) {
+    throw new Error("Kein aktiver Lagerstandort gefunden. Inventar konnte nicht gesetzt werden.");
+  }
+
+  const inventoryItemIds = (inventoryJson.data?.product?.variants?.nodes ?? [])
+    .map((variant) => variant.inventoryItem?.id)
+    .filter((id): id is string => Boolean(id));
+
+  if (inventoryItemIds.length === 0) {
+    return { count: 0, locationName: location.name };
+  }
+
+  const setResponse = await admin.graphql(INVENTORY_SET_QUANTITIES_MUTATION, {
+    variables: {
+      input: {
+        ignoreCompareQuantity: true,
+        name: "available",
+        reason: "correction",
+        referenceDocumentUri: `filamentsync://restock/${encodeURIComponent(productId)}`,
+        quantities: inventoryItemIds.map((inventoryItemId) => ({
+          inventoryItemId,
+          locationId: location.id,
+          quantity,
+          compareQuantity: null,
+        })),
+      },
+      idempotencyKey: `${productId}-${quantity}-${Date.now()}`,
+    },
+  });
+
+  const setJson = (await setResponse.json()) as {
+    data?: {
+      inventorySetQuantities?: {
+        userErrors?: Array<{ message: string }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (setJson.errors?.length) {
+    throw new Error(setJson.errors.map((error) => error.message).join(" | "));
+  }
+
+  const userErrors = setJson.data?.inventorySetQuantities?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    throw new Error(userErrors.map((error) => error.message).join(" | "));
+  }
+
+  return { count: inventoryItemIds.length, locationName: location.name };
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs): Promise<LoaderData> => {
   const { admin } = await authenticate.admin(request);
   const response = await admin.graphql(PRODUCTS_FOR_PICKER_QUERY);
@@ -1322,6 +1446,15 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
           notices.push(`Keine neuen Varianten fuer ${colorOptionName} noetig.`);
         }
       }
+
+      const restocked = await restockProductVariants(
+        admin,
+        product.id,
+        TARGET_VARIANT_STOCK,
+      );
+      notices.push(
+        `${restocked.count} Variante(n) wurden am Standort ${restocked.locationName} auf ${TARGET_VARIANT_STOCK} Stueck gesetzt.`,
+      );
 
       previews = materialProfiles.map((materialProfile) =>
         buildPreview(

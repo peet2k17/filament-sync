@@ -1100,7 +1100,37 @@ export const loader = async ({ request }: LoaderFunctionArgs): Promise<LoaderDat
 export const action = async ({ request }: ActionFunctionArgs): Promise<ActionData> => {
   const { admin } = await authenticate.admin(request);
 
-  const formData = await request.formData();
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return {
+      ok: true,
+      mode: "load",
+      productGid: "",
+      product: null,
+      materialProfiles: [],
+      previews: null,
+      errors: [],
+      notices: [],
+    };
+  }
+
+  const hasIntent = formData.has("intent");
+  const hasProductGid = formData.has("productGid");
+  if (!hasIntent && !hasProductGid) {
+    return {
+      ok: true,
+      mode: "load",
+      productGid: "",
+      product: null,
+      materialProfiles: [],
+      previews: null,
+      errors: [],
+      notices: [],
+    };
+  }
+
   const intent = String(formData.get("intent") ?? "load");
   const mode: ActionMode =
     intent === "sync" ? "sync" : intent === "preview" ? "preview" : "load";
@@ -1341,6 +1371,7 @@ export default function Index() {
       { intent, productGid },
       {
         method: "POST",
+        encType: "application/x-www-form-urlencoded",
       },
     );
   };
@@ -1384,6 +1415,7 @@ export default function Index() {
           </s-paragraph>
           <s-stack direction="inline" gap="base">
             <s-button
+              type="button"
               onClick={() => submit("load")}
               {...(isLoading ? { loading: true } : {})}
               disabled={!productGid}
@@ -1391,6 +1423,7 @@ export default function Index() {
               Produkt laden
             </s-button>
             <s-button
+              type="button"
               variant="secondary"
               onClick={() => submit("preview")}
               {...(isLoading ? { loading: true } : {})}
@@ -1399,6 +1432,7 @@ export default function Index() {
               Vorschau berechnen
             </s-button>
             <s-button
+              type="button"
               variant="primary"
               onClick={() => submit("sync")}
               {...(isLoading ? { loading: true } : {})}

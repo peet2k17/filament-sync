@@ -14,6 +14,7 @@ const DEFAULT_COLOR_OPTION_NAME = "Farbe";
 const ENABLE_LINKED_SWATCH_OPTIONS = false;
 const INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES = false;
 const TARGET_VARIANT_STOCK = 10;
+const SHOPIFY_PAGE_SIZE = 250;
 const SHOPIFY_COLOR_PATTERN_NAMESPACE = "shopify";
 const SHOPIFY_COLOR_PATTERN_KEY = "color-pattern";
 const SHOPIFY_COLOR_PATTERN_TYPE = "shopify--color-pattern";
@@ -324,10 +325,14 @@ const PRODUCT_VARIANTS_BULK_CREATE_MUTATION = `#graphql
 `;
 
 const PRODUCT_VARIANT_INVENTORY_QUERY = `#graphql
-  query ProductVariantInventory($productId: ID!) {
+  query ProductVariantInventory($productId: ID!, $after: String) {
     product(id: $productId) {
       id
-      variants(first: 250) {
+      variants(first: ${SHOPIFY_PAGE_SIZE}, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           inventoryItem {
@@ -336,6 +341,11 @@ const PRODUCT_VARIANT_INVENTORY_QUERY = `#graphql
         }
       }
     }
+  }
+`;
+
+const PRIMARY_LOCATION_QUERY = `#graphql
+  query PrimaryLocation {
     locations(first: 1) {
       nodes {
         id
@@ -1172,22 +1182,9 @@ async function restockProductVariants(
   productId: string,
   quantity: number,
 ): Promise<{ count: number }> {
-  const inventoryResponse = await admin.graphql(PRODUCT_VARIANT_INVENTORY_QUERY, {
-    variables: {
-      productId,
-    },
-  });
-
-  const inventoryJson = (await inventoryResponse.json()) as {
+  const locationResponse = await admin.graphql(PRIMARY_LOCATION_QUERY);
+  const locationJson = (await locationResponse.json()) as {
     data?: {
-      product?: {
-        variants?: {
-          nodes?: Array<{
-            id: string;
-            inventoryItem?: { id: string } | null;
-          }>;
-        };
-      } | null;
       locations?: {
         nodes?: Array<{
           id: string;
@@ -1197,56 +1194,102 @@ async function restockProductVariants(
     errors?: Array<{ message: string }>;
   };
 
-  if (inventoryJson.errors?.length) {
-    throw new Error(inventoryJson.errors.map((error) => error.message).join(" | "));
+  if (locationJson.errors?.length) {
+    throw new Error(locationJson.errors.map((error) => error.message).join(" | "));
   }
 
-  const location = inventoryJson.data?.locations?.nodes?.[0];
+  const location = locationJson.data?.locations?.nodes?.[0];
   if (!location) {
     throw new Error("Kein aktiver Lagerstandort gefunden. Inventar konnte nicht gesetzt werden.");
   }
 
-  const inventoryItemIds = (inventoryJson.data?.product?.variants?.nodes ?? [])
-    .map((variant) => variant.inventoryItem?.id)
-    .filter((id): id is string => Boolean(id));
+  const inventoryItemIds: string[] = [];
+  let after: string | null = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const inventoryResponse = await admin.graphql(PRODUCT_VARIANT_INVENTORY_QUERY, {
+      variables: {
+        productId,
+        after,
+      },
+    });
+
+    const inventoryJson = (await inventoryResponse.json()) as {
+      data?: {
+        product?: {
+          variants?: {
+            pageInfo?: {
+              hasNextPage: boolean;
+              endCursor: string | null;
+            };
+            nodes?: Array<{
+              id: string;
+              inventoryItem?: { id: string } | null;
+            }>;
+          };
+        } | null;
+      };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (inventoryJson.errors?.length) {
+      throw new Error(inventoryJson.errors.map((error) => error.message).join(" | "));
+    }
+
+    const pageNodes = inventoryJson.data?.product?.variants?.nodes ?? [];
+    for (const node of pageNodes) {
+      if (node.inventoryItem?.id) {
+        inventoryItemIds.push(node.inventoryItem.id);
+      }
+    }
+
+    const pageInfo = inventoryJson.data?.product?.variants?.pageInfo;
+    hasNextPage = Boolean(pageInfo?.hasNextPage);
+    after = pageInfo?.endCursor ?? null;
+  }
 
   if (inventoryItemIds.length === 0) {
     return { count: 0 };
   }
 
-  const setResponse = await admin.graphql(INVENTORY_SET_QUANTITIES_MUTATION, {
-    variables: {
-      input: {
-        ignoreCompareQuantity: true,
-        name: "available",
-        reason: "correction",
-        referenceDocumentUri: `filamentsync://restock/${encodeURIComponent(productId)}`,
-        quantities: inventoryItemIds.map((inventoryItemId) => ({
-          inventoryItemId,
-          locationId: location.id,
-          quantity,
-          compareQuantity: null,
-        })),
+  for (let i = 0; i < inventoryItemIds.length; i += SHOPIFY_PAGE_SIZE) {
+    const batch = inventoryItemIds.slice(i, i + SHOPIFY_PAGE_SIZE);
+
+    const setResponse = await admin.graphql(INVENTORY_SET_QUANTITIES_MUTATION, {
+      variables: {
+        input: {
+          ignoreCompareQuantity: true,
+          name: "available",
+          reason: "correction",
+          referenceDocumentUri: `filamentsync://restock/${encodeURIComponent(productId)}`,
+          quantities: batch.map((inventoryItemId) => ({
+            inventoryItemId,
+            locationId: location.id,
+            quantity,
+            compareQuantity: null,
+          })),
+        },
       },
-    },
-  });
+    });
 
-  const setJson = (await setResponse.json()) as {
-    data?: {
-      inventorySetQuantities?: {
-        userErrors?: Array<{ message: string }>;
+    const setJson = (await setResponse.json()) as {
+      data?: {
+        inventorySetQuantities?: {
+          userErrors?: Array<{ message: string }>;
+        };
       };
+      errors?: Array<{ message: string }>;
     };
-    errors?: Array<{ message: string }>;
-  };
 
-  if (setJson.errors?.length) {
-    throw new Error(setJson.errors.map((error) => error.message).join(" | "));
-  }
+    if (setJson.errors?.length) {
+      throw new Error(setJson.errors.map((error) => error.message).join(" | "));
+    }
 
-  const userErrors = setJson.data?.inventorySetQuantities?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    throw new Error(userErrors.map((error) => error.message).join(" | "));
+    const userErrors = setJson.data?.inventorySetQuantities?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      throw new Error(userErrors.map((error) => error.message).join(" | "));
+    }
   }
 
   return { count: inventoryItemIds.length };

@@ -539,6 +539,60 @@ function getMaterialProfileOptionValues(
   );
 }
 
+function mergeMaterialProfilesByOptionName(
+  materialProfiles: MaterialProfileSummary[],
+): {
+  profiles: MaterialProfileSummary[];
+  merged: Array<{ optionName: string; keys: string[] }>;
+} {
+  const byOptionName = new Map<string, MaterialProfileSummary>();
+  const keysByOptionName = new Map<string, Set<string>>();
+
+  for (const profile of materialProfiles) {
+    const optionName = getColorOptionName(profile.metafieldKey);
+    const keySet = keysByOptionName.get(optionName) ?? new Set<string>();
+    keySet.add(profile.metafieldKey);
+    keysByOptionName.set(optionName, keySet);
+
+    const existing = byOptionName.get(optionName);
+    if (!existing) {
+      byOptionName.set(optionName, {
+        ...profile,
+        colors: [...profile.colors],
+      });
+      continue;
+    }
+
+    const seenColorKeys = new Set(
+      existing.colors.map(
+        (color) => `${normalize(color.name)}|${normalizeHexColor(color.colorValue) ?? ""}`,
+      ),
+    );
+
+    for (const color of profile.colors) {
+      const colorKey = `${normalize(color.name)}|${normalizeHexColor(color.colorValue) ?? ""}`;
+      if (seenColorKeys.has(colorKey)) {
+        continue;
+      }
+
+      seenColorKeys.add(colorKey);
+      existing.colors.push(color);
+    }
+  }
+
+  const merged = Array.from(keysByOptionName.entries())
+    .filter(([, keys]) => keys.size > 1)
+    .map(([optionName, keys]) => ({
+      optionName,
+      keys: Array.from(keys.values()),
+    }));
+
+  return {
+    profiles: Array.from(byOptionName.values()),
+    merged,
+  };
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -1103,8 +1157,11 @@ async function createMissingVariants(
   }
 
   const userErrors = responseJson.data?.productVariantsBulkCreate?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    throw new Error(userErrors.map((error) => error.message).join(" | "));
+  const fatalErrors = userErrors.filter(
+    (error) => !error.message.toLowerCase().includes("already exists"),
+  );
+  if (fatalErrors.length > 0) {
+    throw new Error(fatalErrors.map((error) => error.message).join(" | "));
   }
 
   return responseJson.data?.productVariantsBulkCreate?.productVariants?.length ?? 0;
@@ -1279,6 +1336,14 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
 
   try {
     let { product, materialProfiles } = await fetchProductDetails(admin, productGid);
+    const mergedProfiles = mergeMaterialProfilesByOptionName(materialProfiles);
+    materialProfiles = mergedProfiles.profiles;
+    for (const merged of mergedProfiles.merged) {
+      notices.push(
+        `Mehrere Materialprofile wurden fuer Option ${merged.optionName} zusammengefuehrt: ${merged.keys.join(", ")}.`,
+      );
+    }
+
     let previews = materialProfiles.map((materialProfile) =>
       buildPreview(
         product,

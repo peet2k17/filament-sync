@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -10,6 +10,10 @@ import { authenticate } from "../shopify.server";
 
 const MATERIAL_PROFILE_NAMESPACE = "custom";
 const MATERIAL_PROFILE_KEY = "materialprofil";
+const AUTO_SYNC_METAFIELD_KEY = "filamentsync_auto_sync";
+const AUTO_SYNC_LAST_RUN_AT_KEY = "filamentsync_last_run_at";
+const AUTO_SYNC_LAST_STATUS_KEY = "filamentsync_last_status";
+const AUTO_SYNC_LAST_MESSAGE_KEY = "filamentsync_last_message";
 const DEFAULT_COLOR_OPTION_NAME = "Farbe";
 const ENABLE_LINKED_SWATCH_OPTIONS = false;
 const INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES = false;
@@ -102,12 +106,28 @@ type ProductQueryData = {
         } | null;
       }>;
     };
+    autoSyncMetafield: {
+      value: string | null;
+    } | null;
+    autoSyncLastRunAtMetafield: {
+      value: string | null;
+    } | null;
+    autoSyncLastStatusMetafield: {
+      value: string | null;
+    } | null;
+    autoSyncLastMessageMetafield: {
+      value: string | null;
+    } | null;
   } | null;
 };
 
 type ProductSummary = {
   id: string;
   title: string;
+  autoSyncEnabled: boolean;
+  autoSyncLastRunAt: string | null;
+  autoSyncLastStatus: string | null;
+  autoSyncLastMessage: string | null;
   options: Array<{
     id: string;
     name: string;
@@ -152,7 +172,7 @@ type SyncPreview = {
   variantsToCreate: Array<{ optionValue: string }>;
 };
 
-type ActionMode = "load" | "preview" | "sync";
+type ActionMode = "load" | "preview" | "sync" | "setAutoSync";
 
 type ActionData = {
   ok: boolean;
@@ -190,6 +210,18 @@ const PRODUCT_WITH_MATERIAL_PROFILE_QUERY = `#graphql
     product(id: $productId) {
       id
       title
+      autoSyncMetafield: metafield(namespace: "custom", key: "filamentsync_auto_sync") {
+        value
+      }
+      autoSyncLastRunAtMetafield: metafield(namespace: "custom", key: "filamentsync_last_run_at") {
+        value
+      }
+      autoSyncLastStatusMetafield: metafield(namespace: "custom", key: "filamentsync_last_status") {
+        value
+      }
+      autoSyncLastMessageMetafield: metafield(namespace: "custom", key: "filamentsync_last_message") {
+        value
+      }
       options {
         id
         name
@@ -287,6 +319,17 @@ const PRODUCT_WITH_MATERIAL_PROFILE_QUERY = `#graphql
   }
 `;
 
+const METAFIELDS_SET_MUTATION = `#graphql
+  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 const PRODUCT_OPTIONS_CREATE_MUTATION = `#graphql
   mutation ProductOptionsCreate(
     $productId: ID!
@@ -316,6 +359,20 @@ const PRODUCT_VARIANTS_BULK_CREATE_MUTATION = `#graphql
         id
         title
       }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const PRODUCT_VARIANTS_BULK_DELETE_MUTATION = `#graphql
+  mutation ProductVariantsBulkDelete(
+    $productId: ID!
+    $variantsIds: [ID!]!
+  ) {
+    productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
       userErrors {
         field
         message
@@ -422,6 +479,10 @@ function toProductSummary(
   return {
     id: product.id,
     title: product.title,
+    autoSyncEnabled: product.autoSyncMetafield?.value === "true",
+    autoSyncLastRunAt: product.autoSyncLastRunAtMetafield?.value ?? null,
+    autoSyncLastStatus: product.autoSyncLastStatusMetafield?.value ?? null,
+    autoSyncLastMessage: product.autoSyncLastMessageMetafield?.value ?? null,
     options: product.options.map((option) => ({
       id: option.id,
       name: option.name,
@@ -435,6 +496,99 @@ function toProductSummary(
       selectedOptions: variant.selectedOptions,
     })),
   };
+}
+
+async function setProductAutoSyncEnabled(
+  admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
+  productId: string,
+  enabled: boolean,
+): Promise<void> {
+  const response = await admin.graphql(METAFIELDS_SET_MUTATION, {
+    variables: {
+      metafields: [
+        {
+          ownerId: productId,
+          namespace: MATERIAL_PROFILE_NAMESPACE,
+          key: AUTO_SYNC_METAFIELD_KEY,
+          type: "boolean",
+          value: enabled ? "true" : "false",
+        },
+      ],
+    },
+  });
+
+  const responseJson = (await response.json()) as {
+    data?: {
+      metafieldsSet?: {
+        userErrors?: Array<{ message: string }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (responseJson.errors?.length) {
+    throw new Error(responseJson.errors.map((error) => error.message).join(" | "));
+  }
+
+  const userErrors = responseJson.data?.metafieldsSet?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    throw new Error(userErrors.map((error) => error.message).join(" | "));
+  }
+}
+
+export async function setProductAutoSyncRunStatus(
+  admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
+  productId: string,
+  status: "running" | "success" | "error" | "skipped",
+  message: string,
+): Promise<void> {
+  const safeMessage = message.trim().slice(0, 1000);
+
+  const response = await admin.graphql(METAFIELDS_SET_MUTATION, {
+    variables: {
+      metafields: [
+        {
+          ownerId: productId,
+          namespace: MATERIAL_PROFILE_NAMESPACE,
+          key: AUTO_SYNC_LAST_RUN_AT_KEY,
+          type: "date_time",
+          value: new Date().toISOString(),
+        },
+        {
+          ownerId: productId,
+          namespace: MATERIAL_PROFILE_NAMESPACE,
+          key: AUTO_SYNC_LAST_STATUS_KEY,
+          type: "single_line_text_field",
+          value: status,
+        },
+        {
+          ownerId: productId,
+          namespace: MATERIAL_PROFILE_NAMESPACE,
+          key: AUTO_SYNC_LAST_MESSAGE_KEY,
+          type: "multi_line_text_field",
+          value: safeMessage || "-",
+        },
+      ],
+    },
+  });
+
+  const responseJson = (await response.json()) as {
+    data?: {
+      metafieldsSet?: {
+        userErrors?: Array<{ message: string }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (responseJson.errors?.length) {
+    throw new Error(responseJson.errors.map((error) => error.message).join(" | "));
+  }
+
+  const userErrors = responseJson.data?.metafieldsSet?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    throw new Error(userErrors.map((error) => error.message).join(" | "));
+  }
 }
 
 function isMaterialProfileMetafieldKey(key: string): boolean {
@@ -549,7 +703,7 @@ function getMaterialProfileOptionValues(
   );
 }
 
-function mergeMaterialProfilesByOptionName(
+export function mergeMaterialProfilesByOptionName(
   materialProfiles: MaterialProfileSummary[],
 ): {
   profiles: MaterialProfileSummary[];
@@ -1003,7 +1157,7 @@ function buildVariantInputs(
   return results;
 }
 
-async function fetchProductDetails(
+export async function fetchProductDetails(
   admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
   productGid: string,
 ): Promise<{ product: ProductSummary; materialProfiles: MaterialProfileSummary[] }> {
@@ -1177,6 +1331,47 @@ async function createMissingVariants(
   return responseJson.data?.productVariantsBulkCreate?.productVariants?.length ?? 0;
 }
 
+async function deleteVariantsByIds(
+  admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
+  productId: string,
+  variantIds: string[],
+): Promise<number> {
+  if (variantIds.length === 0) return 0;
+
+  let deleted = 0;
+  for (let i = 0; i < variantIds.length; i += SHOPIFY_PAGE_SIZE) {
+    const batch = variantIds.slice(i, i + SHOPIFY_PAGE_SIZE);
+    const response = await admin.graphql(PRODUCT_VARIANTS_BULK_DELETE_MUTATION, {
+      variables: {
+        productId,
+        variantsIds: batch,
+      },
+    });
+
+    const responseJson = (await response.json()) as {
+      data?: {
+        productVariantsBulkDelete?: {
+          userErrors?: Array<{ message: string }>;
+        };
+      };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (responseJson.errors?.length) {
+      throw new Error(responseJson.errors.map((error) => error.message).join(" | "));
+    }
+
+    const userErrors = responseJson.data?.productVariantsBulkDelete?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      throw new Error(userErrors.map((error) => error.message).join(" | "));
+    }
+
+    deleted += batch.length;
+  }
+
+  return deleted;
+}
+
 async function restockProductVariants(
   admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
   productId: string,
@@ -1295,6 +1490,234 @@ async function restockProductVariants(
   return { count: inventoryItemIds.length };
 }
 
+export async function runMaterialProfileSync(
+  admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"],
+  productGid: string,
+  initialProduct: ProductSummary,
+  initialMaterialProfiles: MaterialProfileSummary[],
+): Promise<{
+  product: ProductSummary;
+  materialProfiles: MaterialProfileSummary[];
+  previews: SyncPreview[];
+  notices: string[];
+}> {
+  const notices: string[] = [];
+  let product = initialProduct;
+  let materialProfiles = initialMaterialProfiles;
+
+  const colorPatternMap = new Map<string, string>();
+
+  if (ENABLE_LINKED_SWATCH_OPTIONS) {
+    let loadedMap = await fetchShopifyColorPatternMap(admin);
+
+    let createdColorPatterns = 0;
+    for (const materialProfile of materialProfiles) {
+      createdColorPatterns += await createMissingShopifyColorPatterns(
+        admin,
+        materialProfile,
+        loadedMap,
+      );
+    }
+
+    if (createdColorPatterns > 0) {
+      notices.push(
+        `${createdColorPatterns} shopify.color-pattern Eintrag(e) wurden automatisch erzeugt.`,
+      );
+      loadedMap = await fetchShopifyColorPatternMap(admin);
+    }
+
+    for (const [key, value] of loadedMap.entries()) {
+      colorPatternMap.set(key, value);
+    }
+  } else {
+    notices.push(
+      "Text-Modus aktiv: Variantenoptionen werden ohne shopify.color-pattern Verknuepfung erzeugt.",
+    );
+  }
+
+  for (const initialProfile of materialProfiles) {
+    let activeProfile = materialProfiles.find(
+      (profile) => profile.metafieldKey === initialProfile.metafieldKey,
+    );
+    if (!activeProfile) {
+      continue;
+    }
+
+    const colorOptionName = getColorOptionName(activeProfile.metafieldKey);
+    const linkedColorIdByName = ENABLE_LINKED_SWATCH_OPTIONS
+      ? buildLinkedColorIdByName(activeProfile, colorPatternMap)
+      : new Map<string, string>();
+    const desiredColorMetaobjectIds = ENABLE_LINKED_SWATCH_OPTIONS
+      ? Array.from(new Set(Array.from(linkedColorIdByName.values())))
+      : [];
+    const isSwatchProfile =
+      ENABLE_LINKED_SWATCH_OPTIONS && desiredColorMetaobjectIds.length > 0;
+    const includeHexInOptionValues =
+      !isSwatchProfile && INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES;
+
+    const hasShellOption = product.options.some(
+      (option) => option.name === colorOptionName,
+    );
+
+    if (!hasShellOption) {
+      const profilePreview = buildPreview(
+        product,
+        activeProfile,
+        colorOptionName,
+        includeHexInOptionValues,
+      );
+      await ensureShellColorOptionExists(
+        admin,
+        product.id,
+        colorOptionName,
+        profilePreview.desiredValues,
+        desiredColorMetaobjectIds,
+      );
+      if (isSwatchProfile && desiredColorMetaobjectIds.length > 0) {
+        notices.push(
+          `Option ${colorOptionName} wurde als Farb-Swatch-Option angelegt.`,
+        );
+      } else {
+        notices.push(
+          `Option ${colorOptionName} wurde als Text-Option angelegt${includeHexInOptionValues ? " (mit Hex-Werten)" : ""}.`,
+        );
+      }
+      const refreshed = await fetchProductDetails(admin, productGid);
+      product = refreshed.product;
+      const mergedProfiles = mergeMaterialProfilesByOptionName(refreshed.materialProfiles);
+      materialProfiles = mergedProfiles.profiles;
+      activeProfile = materialProfiles.find(
+        (profile) => profile.metafieldKey === initialProfile.metafieldKey,
+      );
+      if (!activeProfile) {
+        continue;
+      }
+    }
+
+    if (isSwatchProfile) {
+      await ensureShellColorOptionLinkedAndValues(
+        admin,
+        product,
+        colorOptionName,
+        desiredColorMetaobjectIds,
+      );
+      if (desiredColorMetaobjectIds.length > 0) {
+        notices.push(`Option ${colorOptionName} wurde mit shopify.color-pattern verknuepft.`);
+      } else {
+        notices.push(
+          `Keine passende Shopify Color-Pattern-Zuordnung fuer ${colorOptionName} gefunden, Varianten werden ohne Swatch-Link erzeugt.`,
+        );
+      }
+    }
+
+    let profilePreview = buildPreview(
+      product,
+      activeProfile,
+      colorOptionName,
+      includeHexInOptionValues,
+    );
+
+    const desiredNormalizedValues = new Set(
+      profilePreview.desiredValues.map((value) => normalize(value)),
+    );
+    const variantsToDelete = product.variants
+      .filter((variant) => {
+        const selected = variant.selectedOptions.find(
+          (option) => option.name === colorOptionName,
+        );
+        if (!selected) {
+          return false;
+        }
+
+        return !desiredNormalizedValues.has(normalize(selected.value));
+      })
+      .map((variant) => variant.id);
+
+    if (variantsToDelete.length > 0) {
+      const deletedCount = await deleteVariantsByIds(
+        admin,
+        product.id,
+        variantsToDelete,
+      );
+      notices.push(
+        `${deletedCount} veraltete Variante(n) wurden fuer ${colorOptionName} entfernt.`,
+      );
+
+      const refreshed = await fetchProductDetails(admin, productGid);
+      product = refreshed.product;
+      const mergedProfiles = mergeMaterialProfilesByOptionName(refreshed.materialProfiles);
+      materialProfiles = mergedProfiles.profiles;
+      activeProfile = materialProfiles.find(
+        (profile) => profile.metafieldKey === initialProfile.metafieldKey,
+      );
+      if (!activeProfile) {
+        continue;
+      }
+      profilePreview = buildPreview(
+        product,
+        activeProfile,
+        colorOptionName,
+        includeHexInOptionValues,
+      );
+    }
+
+    const variantInputs = buildVariantInputs(
+      product,
+      linkedColorIdByName,
+      profilePreview.desiredValues,
+      colorOptionName,
+      isSwatchProfile,
+    );
+
+    if (variantInputs.length > 0) {
+      const createdCount = await createMissingVariants(admin, product.id, variantInputs);
+      notices.push(
+        `${createdCount} Variante(n) wurden fuer ${colorOptionName} erzeugt.`,
+      );
+
+      const refreshed = await fetchProductDetails(admin, productGid);
+      product = refreshed.product;
+      const mergedProfiles = mergeMaterialProfilesByOptionName(refreshed.materialProfiles);
+      materialProfiles = mergedProfiles.profiles;
+      activeProfile = materialProfiles.find(
+        (profile) => profile.metafieldKey === initialProfile.metafieldKey,
+      );
+      if (!activeProfile) {
+        continue;
+      }
+    }
+
+    if (variantInputs.length === 0) {
+      notices.push(`Keine neuen Varianten fuer ${colorOptionName} noetig.`);
+    }
+  }
+
+  const restocked = await restockProductVariants(
+    admin,
+    product.id,
+    TARGET_VARIANT_STOCK,
+  );
+  notices.push(
+    `${restocked.count} Variante(n) wurden auf ${TARGET_VARIANT_STOCK} Stueck gesetzt.`,
+  );
+
+  const previews = materialProfiles.map((materialProfile) =>
+    buildPreview(
+      product,
+      materialProfile,
+      getColorOptionName(materialProfile.metafieldKey),
+      INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES,
+    ),
+  );
+
+  return {
+    product,
+    materialProfiles,
+    previews,
+    notices,
+  };
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs): Promise<LoaderData> => {
   const { admin } = await authenticate.admin(request);
   const response = await admin.graphql(PRODUCTS_FOR_PICKER_QUERY);
@@ -1351,7 +1774,13 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
 
   const intent = String(formData.get("intent") ?? "load");
   const mode: ActionMode =
-    intent === "sync" ? "sync" : intent === "preview" ? "preview" : "load";
+    intent === "sync"
+      ? "sync"
+      : intent === "preview"
+        ? "preview"
+        : intent === "setAutoSync"
+          ? "setAutoSync"
+          : "load";
   const productGid = String(formData.get("productGid") ?? "").trim();
   const errors: string[] = [];
   const notices: string[] = [];
@@ -1379,7 +1808,7 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
 
   try {
     let { product, materialProfiles } = await fetchProductDetails(admin, productGid);
-    const mergedProfiles = mergeMaterialProfilesByOptionName(materialProfiles);
+    let mergedProfiles = mergeMaterialProfilesByOptionName(materialProfiles);
     materialProfiles = mergedProfiles.profiles;
     for (const merged of mergedProfiles.merged) {
       notices.push(
@@ -1396,168 +1825,19 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
       ),
     );
 
-    if (materialProfiles.length === 0) {
-      errors.push(
-        `Keine gueltigen Materialprofil-Metafelder unter ${MATERIAL_PROFILE_NAMESPACE}.materialprofil* gefunden.`,
-      );
-    }
-
-    if (mode === "sync" && errors.length === 0) {
-      const colorPatternMap = new Map<string, string>();
-
-      if (ENABLE_LINKED_SWATCH_OPTIONS) {
-        let loadedMap = await fetchShopifyColorPatternMap(admin);
-
-        let createdColorPatterns = 0;
-        for (const materialProfile of materialProfiles) {
-          createdColorPatterns += await createMissingShopifyColorPatterns(
-            admin,
-            materialProfile,
-            loadedMap,
-          );
-        }
-
-        if (createdColorPatterns > 0) {
-          notices.push(
-            `${createdColorPatterns} shopify.color-pattern Eintrag(e) wurden automatisch erzeugt.`,
-          );
-          loadedMap = await fetchShopifyColorPatternMap(admin);
-        }
-
-        for (const [key, value] of loadedMap.entries()) {
-          colorPatternMap.set(key, value);
-        }
-      } else {
-        notices.push(
-          "Text-Modus aktiv: Variantenoptionen werden ohne shopify.color-pattern Verknuepfung erzeugt.",
-        );
-      }
-
-      for (const initialProfile of materialProfiles) {
-        let activeProfile = materialProfiles.find(
-          (profile) => profile.metafieldKey === initialProfile.metafieldKey,
-        );
-        if (!activeProfile) {
-          continue;
-        }
-
-        const colorOptionName = getColorOptionName(activeProfile.metafieldKey);
-        const linkedColorIdByName = ENABLE_LINKED_SWATCH_OPTIONS
-          ? buildLinkedColorIdByName(activeProfile, colorPatternMap)
-          : new Map<string, string>();
-        const desiredColorMetaobjectIds = ENABLE_LINKED_SWATCH_OPTIONS
-          ? Array.from(new Set(Array.from(linkedColorIdByName.values())))
-          : [];
-        const isSwatchProfile =
-          ENABLE_LINKED_SWATCH_OPTIONS && desiredColorMetaobjectIds.length > 0;
-        const includeHexInOptionValues =
-          !isSwatchProfile && INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES;
-
-        const hasShellOption = product.options.some(
-          (option) => option.name === colorOptionName,
-        );
-
-        if (!hasShellOption) {
-          const profilePreview = buildPreview(
-            product,
-            activeProfile,
-            colorOptionName,
-            includeHexInOptionValues,
-          );
-          await ensureShellColorOptionExists(
-            admin,
-            product.id,
-            colorOptionName,
-            profilePreview.desiredValues,
-            desiredColorMetaobjectIds,
-          );
-          if (isSwatchProfile && desiredColorMetaobjectIds.length > 0) {
-            notices.push(
-              `Option ${colorOptionName} wurde als Farb-Swatch-Option angelegt.`,
-            );
-          } else {
-            notices.push(
-              `Option ${colorOptionName} wurde als Text-Option angelegt${includeHexInOptionValues ? " (mit Hex-Werten)" : ""}.`,
-            );
-          }
-          const refreshed = await fetchProductDetails(admin, productGid);
-          product = refreshed.product;
-          materialProfiles = refreshed.materialProfiles;
-          activeProfile = materialProfiles.find(
-            (profile) => profile.metafieldKey === initialProfile.metafieldKey,
-          );
-          if (!activeProfile) {
-            continue;
-          }
-        }
-
-        if (isSwatchProfile) {
-          await ensureShellColorOptionLinkedAndValues(
-            admin,
-            product,
-            colorOptionName,
-            desiredColorMetaobjectIds,
-          );
-          if (desiredColorMetaobjectIds.length > 0) {
-            notices.push(`Option ${colorOptionName} wurde mit shopify.color-pattern verknuepft.`);
-          } else {
-            notices.push(
-              `Keine passende Shopify Color-Pattern-Zuordnung fuer ${colorOptionName} gefunden, Varianten werden ohne Swatch-Link erzeugt.`,
-            );
-          }
-        }
-
-        let profilePreview = buildPreview(
-          product,
-          activeProfile,
-          colorOptionName,
-          includeHexInOptionValues,
-        );
-        const variantInputs = buildVariantInputs(
-          product,
-          linkedColorIdByName,
-          profilePreview.desiredValues,
-          colorOptionName,
-          isSwatchProfile,
-        );
-
-        if (variantInputs.length > 0) {
-          const createdCount = await createMissingVariants(admin, product.id, variantInputs);
-          notices.push(
-            `${createdCount} Variante(n) wurden fuer ${colorOptionName} erzeugt.`,
-          );
-
-          const refreshed = await fetchProductDetails(admin, productGid);
-          product = refreshed.product;
-          materialProfiles = refreshed.materialProfiles;
-          activeProfile = materialProfiles.find(
-            (profile) => profile.metafieldKey === initialProfile.metafieldKey,
-          );
-          if (!activeProfile) {
-            continue;
-          }
-          profilePreview = buildPreview(
-            product,
-            activeProfile,
-            colorOptionName,
-            includeHexInOptionValues,
-          );
-        }
-
-        if (variantInputs.length === 0) {
-          notices.push(`Keine neuen Varianten fuer ${colorOptionName} noetig.`);
-        }
-      }
-
-      const restocked = await restockProductVariants(
-        admin,
-        product.id,
-        TARGET_VARIANT_STOCK,
-      );
+    if (mode === "setAutoSync") {
+      const enabled = String(formData.get("autoSyncEnabled") ?? "false") === "true";
+      await setProductAutoSyncEnabled(admin, product.id, enabled);
       notices.push(
-        `${restocked.count} Variante(n) wurden auf ${TARGET_VARIANT_STOCK} Stueck gesetzt.`,
+        enabled
+          ? "Auto-Sync wurde fuer dieses Produkt aktiviert."
+          : "Auto-Sync wurde fuer dieses Produkt deaktiviert.",
       );
 
+      const refreshed = await fetchProductDetails(admin, productGid);
+      const mergedRefreshed = mergeMaterialProfilesByOptionName(refreshed.materialProfiles);
+      product = refreshed.product;
+      materialProfiles = mergedRefreshed.profiles;
       previews = materialProfiles.map((materialProfile) =>
         buildPreview(
           product,
@@ -1566,6 +1846,25 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
           INCLUDE_HEX_IN_NON_SWATCH_OPTION_VALUES,
         ),
       );
+    }
+
+    if (materialProfiles.length === 0) {
+      errors.push(
+        `Keine gueltigen Materialprofil-Metafelder unter ${MATERIAL_PROFILE_NAMESPACE}.materialprofil* gefunden.`,
+      );
+    }
+
+    if (mode === "sync" && errors.length === 0) {
+      const syncResult = await runMaterialProfileSync(
+        admin,
+        productGid,
+        product,
+        materialProfiles,
+      );
+      product = syncResult.product;
+      materialProfiles = syncResult.materialProfiles;
+      previews = syncResult.previews;
+      notices.push(...syncResult.notices);
     }
 
     return {
@@ -1596,6 +1895,7 @@ export default function Index() {
   const { products } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const [productGid, setProductGid] = useState(products[0]?.id ?? "");
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
 
   const isLoading =
     ["loading", "submitting"].includes(fetcher.state) &&
@@ -1603,7 +1903,11 @@ export default function Index() {
 
   const submit = (intent: ActionMode) => {
     fetcher.submit(
-      { intent, productGid },
+      {
+        intent,
+        productGid,
+        autoSyncEnabled: autoSyncEnabled ? "true" : "false",
+      },
       {
         method: "POST",
         encType: "application/x-www-form-urlencoded",
@@ -1614,9 +1918,25 @@ export default function Index() {
   const data = fetcher.data;
   const previews = data?.previews ?? [];
 
+  useEffect(() => {
+    if (typeof data?.product?.autoSyncEnabled === "boolean") {
+      setAutoSyncEnabled(data.product.autoSyncEnabled);
+    }
+  }, [data?.product?.autoSyncEnabled]);
+
   const selectedProductTitle = useMemo(() => {
     return products.find((product) => product.id === productGid)?.title ?? "";
   }, [products, productGid]);
+
+  const lastAutoSyncRunText = useMemo(() => {
+    const raw = data?.product?.autoSyncLastRunAt;
+    if (!raw) return "-";
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+
+    return parsed.toLocaleString("de-DE");
+  }, [data?.product?.autoSyncLastRunAt]);
 
   return (
     <s-page heading="FilamentSync MVP">
@@ -1675,6 +1995,30 @@ export default function Index() {
             >
               Varianten synchronisieren
             </s-button>
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                marginLeft: "8px",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={autoSyncEnabled}
+                onChange={(event) => setAutoSyncEnabled(event.currentTarget.checked)}
+              />
+              Auto-Sync
+            </label>
+            <s-button
+              type="button"
+              variant="secondary"
+              onClick={() => submit("setAutoSync")}
+              {...(isLoading ? { loading: true } : {})}
+              disabled={!productGid}
+            >
+              Auto-Sync speichern
+            </s-button>
           </s-stack>
         </s-stack>
       </s-section>
@@ -1724,6 +2068,22 @@ export default function Index() {
                   ))}
                 </ul>
               )}
+            </s-box>
+
+            <s-box padding="base" borderWidth="base" borderRadius="base">
+              <s-heading>Auto-Sync Status</s-heading>
+              <s-paragraph>
+                <strong>Aktiv:</strong> {data.product.autoSyncEnabled ? "Ja" : "Nein"}
+              </s-paragraph>
+              <s-paragraph>
+                <strong>Letzter Lauf:</strong> {lastAutoSyncRunText}
+              </s-paragraph>
+              <s-paragraph>
+                <strong>Status:</strong> {data.product.autoSyncLastStatus ?? "-"}
+              </s-paragraph>
+              <s-paragraph>
+                <strong>Meldung:</strong> {data.product.autoSyncLastMessage ?? "-"}
+              </s-paragraph>
             </s-box>
 
             <s-box padding="base" borderWidth="base" borderRadius="base">

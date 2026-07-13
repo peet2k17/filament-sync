@@ -51,6 +51,7 @@ api_version = "2026-07"
   [[webhooks.subscriptions]]
   uri = "/webhooks/metaobjects/update"
   topics = [ "metaobjects/update" ]
+  filter = "type:*"
 
 [auth]
 redirect_urls = [ "https://app-filamentsync.druckbar3d.com/auth/callback" ]

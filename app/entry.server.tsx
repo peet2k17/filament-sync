@@ -5,8 +5,11 @@ import { createReadableStreamFromReadable } from "@react-router/node";
 import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { startAutoSyncWorker } from "./services/auto-sync-worker.server";
 
 export const streamTimeout = 5000;
+
+startAutoSyncWorker();
 
 export default async function handleRequest(
   request: Request,

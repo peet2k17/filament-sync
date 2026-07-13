@@ -22,6 +22,9 @@ const SHOPIFY_PAGE_SIZE = 250;
 const SHOPIFY_COLOR_PATTERN_NAMESPACE = "shopify";
 const SHOPIFY_COLOR_PATTERN_KEY = "color-pattern";
 const SHOPIFY_COLOR_PATTERN_TYPE = "shopify--color-pattern";
+const AUTO_SYNC_INTERVAL_SECONDS = Number(
+  process.env.AUTO_SYNC_MIN_INTERVAL_SECONDS ?? "60",
+);
 
 type PickerProduct = {
   id: string;
@@ -30,6 +33,7 @@ type PickerProduct = {
 
 type LoaderData = {
   products: PickerProduct[];
+  autoSyncIntervalSeconds: number;
 };
 
 type MetaobjectFieldNode = {
@@ -1735,7 +1739,13 @@ export const loader = async ({ request }: LoaderFunctionArgs): Promise<LoaderDat
     title: product.title || "(ohne Titel)",
   }));
 
-  return { products };
+  return {
+    products,
+    autoSyncIntervalSeconds:
+      Number.isFinite(AUTO_SYNC_INTERVAL_SECONDS) && AUTO_SYNC_INTERVAL_SECONDS > 0
+        ? AUTO_SYNC_INTERVAL_SECONDS
+        : 60,
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs): Promise<ActionData> => {
@@ -1892,7 +1902,7 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
 };
 
 export default function Index() {
-  const { products } = useLoaderData<typeof loader>();
+  const { products, autoSyncIntervalSeconds } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const [productGid, setProductGid] = useState(products[0]?.id ?? "");
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
@@ -1967,6 +1977,9 @@ export default function Index() {
           </select>
           <s-paragraph>
             <strong>Ausgewaehlt:</strong> {selectedProductTitle || "-"}
+          </s-paragraph>
+          <s-paragraph>
+            <strong>Auto-Sync Intervall:</strong> {autoSyncIntervalSeconds}s (Background-Worker)
           </s-paragraph>
           <s-stack direction="inline" gap="base">
             <s-button

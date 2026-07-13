@@ -13,10 +13,10 @@ type ProductUpdatePayload = {
 };
 
 const AUTO_SYNC_MIN_INTERVAL_SECONDS = Number(
-  process.env.AUTO_SYNC_MIN_INTERVAL_SECONDS ?? "900",
+  process.env.AUTO_SYNC_MIN_INTERVAL_SECONDS ?? "60",
 );
 const AUTO_SYNC_RUNNING_LOCK_SECONDS = Number(
-  process.env.AUTO_SYNC_RUNNING_LOCK_SECONDS ?? "180",
+  process.env.AUTO_SYNC_RUNNING_LOCK_SECONDS ?? "120",
 );
 
 function toProductGid(payload: ProductUpdatePayload): string | null {

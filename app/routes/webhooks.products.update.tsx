@@ -12,6 +12,13 @@ type ProductUpdatePayload = {
   admin_graphql_api_id?: string;
 };
 
+const AUTO_SYNC_MIN_INTERVAL_SECONDS = Number(
+  process.env.AUTO_SYNC_MIN_INTERVAL_SECONDS ?? "900",
+);
+const AUTO_SYNC_RUNNING_LOCK_SECONDS = Number(
+  process.env.AUTO_SYNC_RUNNING_LOCK_SECONDS ?? "180",
+);
+
 function toProductGid(payload: ProductUpdatePayload): string | null {
   if (typeof payload.admin_graphql_api_id === "string" && payload.admin_graphql_api_id) {
     return payload.admin_graphql_api_id;
@@ -52,17 +59,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const { product, materialProfiles } = await fetchProductDetails(admin, productGid);
 
     if (!product.autoSyncEnabled) {
-      await writeStatus("skipped", "Auto-Sync ist fuer dieses Produkt deaktiviert.");
       return new Response();
+    }
+
+    const lastRunAt = product.autoSyncLastRunAt
+      ? new Date(product.autoSyncLastRunAt)
+      : null;
+    const lastRunAtMs =
+      lastRunAt && !Number.isNaN(lastRunAt.getTime()) ? lastRunAt.getTime() : null;
+
+    if (lastRunAtMs) {
+      const elapsedSeconds = Math.floor((Date.now() - lastRunAtMs) / 1000);
+      if (
+        product.autoSyncLastStatus === "running" &&
+        elapsedSeconds < AUTO_SYNC_RUNNING_LOCK_SECONDS
+      ) {
+        console.log(
+          `Skipping auto-sync for ${productGid}: previous run still considered running (${elapsedSeconds}s ago).`,
+        );
+        return new Response();
+      }
+
+      if (elapsedSeconds < AUTO_SYNC_MIN_INTERVAL_SECONDS) {
+        console.log(
+          `Skipping auto-sync for ${productGid}: cooldown active (${elapsedSeconds}s < ${AUTO_SYNC_MIN_INTERVAL_SECONDS}s).`,
+        );
+        return new Response();
+      }
     }
 
     const merged = mergeMaterialProfilesByOptionName(materialProfiles);
     if (merged.profiles.length === 0) {
-      await writeStatus("skipped", "Keine gueltigen Materialprofil-Metafelder gefunden.");
       return new Response();
     }
 
-    await writeStatus("running", "Auto-Sync gestartet.");
     const result = await runMaterialProfileSync(admin, productGid, product, merged.profiles);
     const summary =
       result.notices.length > 0
